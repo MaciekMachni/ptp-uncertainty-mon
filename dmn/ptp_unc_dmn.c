@@ -21,6 +21,7 @@
 #define PTP_PORT_STATE_SLAVE 9
 #define DEFAULT_POLL_MS 1000
 #define DEFAULT_MAX_DRIFT_PPB 100000 /* 100 ppm */
+#define DISCONNECTED_RETRY_MS 250
 #define MAX_CONFIG_LINE 256
 
 static volatile sig_atomic_t keep_running = 1;
@@ -97,6 +98,8 @@ static void publish_shm(struct ptp_unc_shm_segment *shm,
 {
     uint64_t now_mono = monotonic_ns();
     uint64_t total;
+    uint32_t publish_port_state;
+    uint32_t publish_is_synchronized;
     int ptp4l_connected = client->connected ? 1 : 0;
     int32_t phc_index = known_phc_index;
 
@@ -142,13 +145,25 @@ static void publish_shm(struct ptp_unc_shm_segment *shm,
     total = abs64(last_valid.offset_from_master_ns) +
             abs64(last_valid.mean_path_delay_ns);
 
+    /*
+     * Preserve last valid sync anchor for drift extrapolation, but do not
+     * publish a latched SLAVE/synchronized state when ptp4l is offline.
+     */
+    if (ptp4l_connected) {
+        publish_port_state = last_valid.port_state;
+        publish_is_synchronized = last_valid.is_synchronized;
+    } else {
+        publish_port_state = 0;
+        publish_is_synchronized = 0;
+    }
+
     shm->seq = 0;
     __sync_synchronize();
 
     shm->generation = generation;
     shm->ptp4l_connected = (uint32_t)ptp4l_connected;
-    shm->port_state = last_valid.port_state;
-    shm->is_synchronized = last_valid.is_synchronized;
+    shm->port_state = publish_port_state;
+    shm->is_synchronized = publish_is_synchronized;
     shm->offset_from_master_ns = last_valid.offset_from_master_ns;
     shm->mean_path_delay_ns = last_valid.mean_path_delay_ns;
     shm->steps_removed = last_valid.steps_removed;
@@ -264,6 +279,11 @@ static void on_ptp4l_connected(struct ptp4l_client *client)
     if (!readonly) {
         if (ptp4l_client_query_all(client) == 0) {
             update_poll_interval_from_port_data(client);
+        } else {
+            if (verbose)
+                fprintf(stderr, "initial ptp4l query failed, disconnecting\n");
+            ptp4l_client_disconnect(client);
+            return;
         }
     } else if (verbose) {
         fprintf(stderr, "Connected to PTP4L read-only socket: %s\n",
@@ -310,6 +330,8 @@ static int query_ptp4l(struct ptp4l_client *client)
 
     update_poll_interval_from_port_data(client);
     detect_and_update_phc_index(client);
+    if (client->current_data_valid)
+        client->had_successful_query = 1;
     return client->current_data_valid ? 0 : -1;
 }
 
@@ -516,7 +538,10 @@ int main(int argc, char **argv)
             publish_shm(shm, &client, generation);
         }
 
-        sleep_ms(poll_interval_ms);
+        if (client.connected)
+            sleep_ms(poll_interval_ms);
+        else
+            sleep_ms(DISCONNECTED_RETRY_MS);
     }
 
     if (verbose)

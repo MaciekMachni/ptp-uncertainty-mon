@@ -2,7 +2,7 @@
 ptp4l_socket /var/run/ptp4l
 
 # Poll interval in milliseconds (overrides auto-polling when set)
-poll_interval_ms 1000
+#poll_interval_ms 1000
 
 # Auto-adjust poll interval from PORT_DATA_SET logSyncInterval (0 or 1)
 ptp4l_auto_polling 1

@@ -70,7 +70,7 @@ static int send_mgmt(struct ptp4l_client *c, uint16_t mgmt_id, uint8_t action,
 
     if (send(c->socket_fd, buffer, msg_len, 0) < 0) {
         perror("ptp4l send");
-        c->connected = 0;
+        ptp4l_client_disconnect(c);
         return -1;
     }
 
@@ -98,7 +98,7 @@ static int recv_response(struct ptp4l_client *c, uint8_t *buffer, size_t size)
     ret = recv(c->socket_fd, buffer, size, 0);
     if (ret < 0) {
         perror("ptp4l recv");
-        c->connected = 0;
+        ptp4l_client_disconnect(c);
     }
     return ret;
 }
@@ -287,6 +287,7 @@ int ptp4l_client_query_all(struct ptp4l_client *c)
     if (ptp4l_client_get_time_status_np(c) < 0)
         return -1;
 
+    c->had_successful_query = 1;
     return 0;
 }
 
@@ -311,17 +312,21 @@ int ptp4l_client_connect(struct ptp4l_client *c)
 {
     struct sockaddr_un remote, local;
     time_t now = time(NULL);
+    char local_path[sizeof(local.sun_path)];
 
-    if (now - c->last_connect_attempt < PTP4L_RECONNECT_INTERVAL)
+    if (c->connected)
+        return 0;
+
+    /*
+     * Before the first successful query, keep retrying quickly so a daemon
+     * started before ptp4l can attach as soon as the socket appears.
+     */
+    if (c->had_successful_query &&
+        now - c->last_connect_attempt < PTP4L_RECONNECT_INTERVAL)
         return -1;
 
-    c->last_connect_attempt = now;
-
-    if (c->socket_fd >= 0) {
-        close(c->socket_fd);
-        c->socket_fd = -1;
-        c->connected = 0;
-    }
+    if (c->socket_fd >= 0)
+        ptp4l_client_disconnect(c);
 
     c->socket_fd = socket(AF_UNIX, SOCK_DGRAM, 0);
     if (c->socket_fd < 0) {
@@ -332,7 +337,8 @@ int ptp4l_client_connect(struct ptp4l_client *c)
     memset(&local, 0, sizeof(local));
     local.sun_family = AF_UNIX;
     snprintf(local.sun_path, sizeof(local.sun_path), "/tmp/ptp_unc_%d", getpid());
-    unlink(local.sun_path);
+    snprintf(local_path, sizeof(local_path), "%s", local.sun_path);
+    unlink(local_path);
 
     if (bind(c->socket_fd, (struct sockaddr *)&local, sizeof(local)) < 0) {
         perror("bind");
@@ -346,14 +352,25 @@ int ptp4l_client_connect(struct ptp4l_client *c)
     snprintf(remote.sun_path, sizeof(remote.sun_path), "%s", c->socket_path);
 
     if (connect(c->socket_fd, (struct sockaddr *)&remote, sizeof(remote)) < 0) {
-        perror("connect");
-        unlink(local.sun_path);
+        int err = errno;
+
+        if (err != ENOENT && err != ECONNREFUSED)
+            perror("connect");
+        else
+            log_msg(c, "Waiting for PTP4L socket at %s\n", c->socket_path);
+
+        unlink(local_path);
         close(c->socket_fd);
         c->socket_fd = -1;
+
+        if (c->had_successful_query && err != ENOENT && err != ECONNREFUSED)
+            c->last_connect_attempt = now;
+
         return -1;
     }
 
     c->connected = 1;
+    c->last_connect_attempt = now;
     log_msg(c, "Connected to PTP4L at %s\n", c->socket_path);
     return 0;
 }
@@ -368,4 +385,6 @@ void ptp4l_client_disconnect(struct ptp4l_client *c)
         c->socket_fd = -1;
     }
     c->connected = 0;
+    if (c->had_successful_query)
+        c->last_connect_attempt = time(NULL);
 }

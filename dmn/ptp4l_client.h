@@ -100,6 +100,7 @@ struct ptp4l_client {
     char    *socket_path;
     time_t   last_connect_attempt;
     int      connected;
+    int      had_successful_query;
     uint16_t sequence_id;
     uint8_t  domain_number;
     int      verbose;
