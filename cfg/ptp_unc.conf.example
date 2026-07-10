@@ -12,6 +12,7 @@ phc_auto_detect 1
 
 # PTP domain number (0-255)
 ptp4l_domain 0
+#ptp4l_domain 24
 
 # Worst-case clock drift in ppb for extrapolating uncertainty (100 ppm)
 max_drift_ppb 100000
